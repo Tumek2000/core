@@ -273,7 +273,12 @@ class LgWebOSMediaPlayerEntity(WebOsTvEntity, RestoreEntity, MediaPlayerEntity):
             await self.coordinator.turn_on.async_run(self.hass, self._context)
         elif macs := self.coordinator.mac_addresses:
             try:
-                await self._client.turn_on(macs)
+                if broadcast_address := self.coordinator.broadcast_address:
+                    await self._client.turn_on(
+                        macs, broadcast_address=broadcast_address
+                    )
+                else:
+                    await self._client.turn_on(macs)
             except WebOsTvWakeError as error:
                 raise HomeAssistantError(
                     translation_domain=DOMAIN,

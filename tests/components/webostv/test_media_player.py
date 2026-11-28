@@ -1520,7 +1520,15 @@ async def test_automation_priority(
 ) -> None:
     """Always prefer the user's turn-on automation."""
     client.mac_addresses = macs
-    await setup_webostv(hass)
+    await setup_webostv(
+        hass,
+        options={
+            "wake_on_lan": {
+                "mac": "11:22:33:44:55:66",
+                "broadcast_address": "192.168.10.255",
+            }
+        },
+    )
     client.tv_state.is_on = False
     await client.mock_state_update()
     assert await async_setup_component(
@@ -1556,3 +1564,52 @@ async def test_wake_error(hass: HomeAssistant, client: MagicMock) -> None:
             "media_player", SERVICE_TURN_ON, {ATTR_ENTITY_ID: ENTITY_ID}, blocking=True
         )
     assert err.value.translation_key == "wake_failed"
+
+
+@pytest.mark.parametrize(
+    ("reported_macs", "wake_options", "expected_macs", "kwargs"),
+    [
+        pytest.param(
+            {},
+            {"mac": "11:22:33:44:55:66"},
+            ["11:22:33:44:55:66"],
+            {},
+            id="manual-mac",
+        ),
+        pytest.param(
+            {"wired": MAC_ADDRESS},
+            {"mac": "11:22:33:44:55:66", "broadcast_address": "192.168.10.255"},
+            ["11:22:33:44:55:66"],
+            {"broadcast_address": "192.168.10.255"},
+            id="override-both",
+        ),
+        pytest.param(
+            {"wired": MAC_ADDRESS},
+            {"broadcast_address": "192.168.10.255"},
+            [MAC_ADDRESS],
+            {"broadcast_address": "192.168.10.255"},
+            id="broadcast-only",
+        ),
+    ],
+)
+async def test_wake_options(
+    hass: HomeAssistant,
+    client: MagicMock,
+    reported_macs: dict[str, str],
+    wake_options: dict[str, str],
+    expected_macs: list[str],
+    kwargs: dict[str, str],
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Use wake overrides even when the TV is unreachable."""
+    client.mac_addresses = reported_macs
+    await setup_webostv(hass, options={"wake_on_lan": wake_options})
+    client.tv_state.is_on = False
+    client.is_connected.return_value = False
+    client.connect.side_effect = WebOsTvConnectionError
+    await mock_scan_interval(hass, freezer)
+    assert hass.states.get(ENTITY_ID).state == STATE_OFF
+    await hass.services.async_call(
+        "media_player", SERVICE_TURN_ON, {ATTR_ENTITY_ID: ENTITY_ID}, blocking=True
+    )
+    client.turn_on.assert_awaited_once_with(expected_macs, **kwargs)
