@@ -1,11 +1,7 @@
 """Constants for the LG webOS TV integration."""
 
-import asyncio
 from enum import StrEnum
 import logging
-
-import aiohttp
-from aiowebostv import WebOsTvCommandError
 
 from homeassistant.const import Platform
 
@@ -19,6 +15,7 @@ ATTR_SOUND_OUTPUT = "sound_output"
 
 CONF_ON_ACTION = "turn_on_action"
 CONF_SOURCES = "sources"
+CONF_WAKE_ON_LAN = "wake_on_lan"
 
 
 class WebOsTvService(StrEnum):
@@ -39,13 +36,3 @@ class WebOsTvServiceArgument(StrEnum):
 
 
 LIVE_TV_APP_ID = "com.webos.app.livetv"
-
-WEBOSTV_EXCEPTIONS = (
-    ConnectionResetError,
-    WebOsTvCommandError,
-    aiohttp.ClientOSError,
-    aiohttp.ServerDisconnectedError,
-    aiohttp.WSMessageTypeError,
-    asyncio.CancelledError,
-    asyncio.TimeoutError,
-)

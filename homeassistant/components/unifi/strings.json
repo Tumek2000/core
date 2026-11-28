@@ -74,6 +74,14 @@
         "name": "Regenerate password"
       }
     },
+    "date": {
+      "firewall_policy_schedule_end_date": {
+        "name": "Schedule end date"
+      },
+      "firewall_policy_schedule_start_date": {
+        "name": "Schedule start date"
+      }
+    },
     "image": {
       "wlan_qr_code": {
         "name": "QR code"
@@ -86,7 +94,7 @@
     },
     "select": {
       "firewall_policy_schedule_mode": {
-        "name": "{policy_name} schedule",
+        "name": "Schedule",
         "state": {
           "always": "Always",
           "custom": "Custom",
@@ -136,7 +144,7 @@
         "name": "Uplink MAC"
       },
       "firewall_policy_schedule_status": {
-        "name": "{policy_name} schedule status",
+        "name": "Schedule status",
         "state": {
           "active": "[%key:common::state::active%]",
           "disabled": "[%key:common::state::disabled%]",
@@ -202,11 +210,43 @@
       "block_client": {
         "name": "Blocked"
       },
+      "firewall_policy_schedule_all_day": {
+        "name": "Schedule all day"
+      },
+      "firewall_policy_schedule_day_fri": {
+        "name": "Schedule Friday"
+      },
+      "firewall_policy_schedule_day_mon": {
+        "name": "Schedule Monday"
+      },
+      "firewall_policy_schedule_day_sat": {
+        "name": "Schedule Saturday"
+      },
+      "firewall_policy_schedule_day_sun": {
+        "name": "Schedule Sunday"
+      },
+      "firewall_policy_schedule_day_thu": {
+        "name": "Schedule Thursday"
+      },
+      "firewall_policy_schedule_day_tue": {
+        "name": "Schedule Tuesday"
+      },
+      "firewall_policy_schedule_day_wed": {
+        "name": "Schedule Wednesday"
+      },
       "poe_port_control": {
         "name": "PoE"
       },
       "wlan_control": {
         "name": "Enabled"
+      }
+    },
+    "time": {
+      "firewall_policy_schedule_end": {
+        "name": "Schedule end"
+      },
+      "firewall_policy_schedule_start": {
+        "name": "Schedule start"
       }
     },
     "update": {
@@ -231,8 +271,14 @@
     "remove_clients_request_failed": {
       "message": "Failed to remove clients from UniFi Network"
     },
-    "schedule_mode_not_supported": {
-      "message": "This schedule mode can only be set in UniFi Network"
+    "schedule_dates_out_of_order": {
+      "message": "The schedule's start date must be before its end date"
+    },
+    "schedule_needs_a_day": {
+      "message": "The schedule needs at least one day of the week"
+    },
+    "schedule_setting_unused_in_mode": {
+      "message": "The policy's current schedule mode doesn't use this setting"
     },
     "site_not_found": {
       "message": "The configured UniFi Network site no longer exists"
