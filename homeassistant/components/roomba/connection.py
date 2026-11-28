@@ -37,10 +37,19 @@ TELEMETRY_QUIET_SECONDS = 2
 TELEMETRY_MAX_SECONDS = 30
 COMMAND_HOLD_SECONDS = 120
 MISSION_CHECK_SECONDS = 60
-ACTIVE_PHASES = frozenset({"run", "hmMidMsn", "hmPostMsn", "hmUsrDock", "evac"})
+# With polling disabled, retry an interrupted mission for 30 minutes.
+RECOVERY_ATTEMPTS = 30
+ACTIVE_PHASES = frozenset(
+    {"run", "hmMidMsn", "hmPostMsn", "hmUsrDock", "evac", "refill", "spot"}
+)
 MISSION_FIELDS = frozenset({"phase", "cycle"})
 
 type SessionCallable = Callable[[HomeAssistant, RoombaClient], Awaitable[object]]
+
+
+def _is_telemetry(reported: dict[str, object]) -> bool:
+    """Return True for reported state other than Wi-Fi statistics alone."""
+    return len(reported) > 1 or (bool(reported) and "signal" not in reported)
 
 
 class RoombaConnection:
@@ -76,6 +85,9 @@ class RoombaConnection:
         self._last_message: float | None = None
         self._mission_fields: set[str] = set()
         self._opening = False
+        self._interrupted = False
+        self._recovery_attempts = 0
+        self._unsub_recovery: CALLBACK_TYPE | None = None
         self._fresh = asyncio.Event()
         self._closed = False
         self._unreachable = False
@@ -105,8 +117,10 @@ class RoombaConnection:
                 self.hass, self._async_poll, PERIODIC_UPDATE_INTERVAL
             )
         # Setup collected the first state, which may still be partial.
-        self._session_start = self._last_message = time.monotonic()
+        self._session_start = time.monotonic()
         reported = self.roomba.master_state.get("state", {}).get("reported", {})
+        if _is_telemetry(reported):
+            self._last_message = self._session_start
         mission = reported.get("cleanMissionStatus") or {}
         self._mission_fields.update(MISSION_FIELDS.intersection(mission))
         self._schedule_settle()
@@ -121,6 +135,7 @@ class RoombaConnection:
         async with self._lock:
             self._cancel_settle()
             self._cancel_release()
+            self._cancel_recovery()
             if self._unsub_message:
                 self._unsub_message()
                 self._unsub_message = None
@@ -135,10 +150,14 @@ class RoombaConnection:
     def _on_message(self, message: RoombaMessage) -> None:
         """Note when the robot last published something other than Wi-Fi stats."""
         reported = (message.get("state") or {}).get("reported") or {}
-        if len(reported) > 1 or (reported and "signal" not in reported):
+        if _is_telemetry(reported):
             self._last_message = time.monotonic()
         mission = reported.get("cleanMissionStatus") or {}
         self._mission_fields.update(MISSION_FIELDS.intersection(mission))
+        if self._interrupted and self._mission_fresh:
+            self._interrupted = False
+            self._recovery_attempts = 0
+            self._cancel_recovery()
 
     @property
     def _mission_fresh(self) -> bool:
@@ -149,6 +168,8 @@ class RoombaConnection:
     def _on_connection_state(self, state: str, _error: str | None) -> None:
         """Track sessions that the client drops and recovers on its own."""
         if state == "disconnected":
+            if self._mission_fresh and self.robot_active:
+                self._interrupted = True
             self._mission_fields.clear()
         elif not self._opening and not self._closed:
             # Collect the recovered session's state before trusting it.
@@ -168,7 +189,9 @@ class RoombaConnection:
         async with self._lock:
             if self._closed:
                 return
-            if not self.roomba.connected:
+            # A settled session without mission state will not get it by waiting.
+            stale = wait and not self._unsub_settle and not self._mission_fresh
+            if not self.roomba.connected or stale:
                 _LOGGER.debug("Connecting to send a command")
                 await self._async_open()
                 self._mark_reachable()
@@ -326,3 +349,33 @@ class RoombaConnection:
             # A dropped session is torn down too, so it stops reconnecting.
             _LOGGER.debug("Robot idle, closing the session so it can sleep")
             await self._disconnect(self.hass, self.roomba)
+            if self._interrupted and not self.polling:
+                self._schedule_recovery()
+
+    @callback
+    def _schedule_recovery(self) -> None:
+        """Retry a mission interrupted by an outage, a bounded number of times."""
+        if self._unsub_recovery or self._closed:
+            return
+        if self._recovery_attempts >= RECOVERY_ATTEMPTS:
+            _LOGGER.debug("Giving up recovering the interrupted mission")
+            self._interrupted = False
+            self._recovery_attempts = 0
+            return
+        self._recovery_attempts += 1
+
+        async def _recover(_now: datetime) -> None:
+            self._unsub_recovery = None
+            await self.async_refresh()
+            if self._interrupted and not self.roomba.connected:
+                self._schedule_recovery()
+
+        self._unsub_recovery = async_call_later(
+            self.hass, MISSION_CHECK_SECONDS, _recover
+        )
+
+    @callback
+    def _cancel_recovery(self) -> None:
+        if self._unsub_recovery:
+            self._unsub_recovery()
+            self._unsub_recovery = None

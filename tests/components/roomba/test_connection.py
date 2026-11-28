@@ -15,6 +15,7 @@ from homeassistant.components.roomba.connection import (
     COMMAND_HOLD_SECONDS,
     MISSION_CHECK_SECONDS,
     PERIODIC_UPDATE_INTERVAL,
+    RECOVERY_ATTEMPTS,
     TELEMETRY_MAX_SECONDS,
     TELEMETRY_QUIET_SECONDS,
 )
@@ -959,3 +960,126 @@ async def test_partial_setup_state_is_not_mission_state(
 
     assert exc_info.value.translation_key == "no_mission_state"
     periodic_roomba.send_command.assert_not_awaited()
+
+
+@pytest.mark.parametrize("phase", ["refill", "spot"])
+async def test_refill_and_spot_keep_session(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    mock_config_entry: MockConfigEntry,
+    periodic_roomba: AsyncMock,
+    phase: str,
+) -> None:
+    """Test refilling and spot cleaning count as a mission."""
+    _set_phase(periodic_roomba, phase)
+    await _setup(hass, mock_config_entry, continuous=False)
+
+    await _advance(hass, freezer, timedelta(seconds=TELEMETRY_QUIET_SECONDS))
+
+    assert periodic_roomba.connected
+
+
+async def test_wifi_only_setup_state_waits_for_telemetry(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    mock_config_entry: MockConfigEntry,
+    periodic_roomba: AsyncMock,
+) -> None:
+    """Test setup state with only Wi-Fi statistics does not count as telemetry."""
+    periodic_roomba.master_state = {"state": {"reported": {"signal": {"rssi": -50}}}}
+    await _setup(hass, mock_config_entry, continuous=False)
+
+    await _advance(hass, freezer, timedelta(seconds=TELEMETRY_QUIET_SECONDS))
+    assert periodic_roomba.connected
+
+    await _advance(hass, freezer, timedelta(seconds=TELEMETRY_MAX_SECONDS))
+    assert not periodic_roomba.connected
+
+
+async def test_retry_after_missing_mission_state_reconnects(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    mock_config_entry: MockConfigEntry,
+    periodic_roomba: AsyncMock,
+) -> None:
+    """Test a retried start reconnects instead of reusing a session without it."""
+    await _setup(hass, mock_config_entry, continuous=False)
+    await _advance(hass, freezer, timedelta(seconds=TELEMETRY_QUIET_SECONDS))
+    with pytest.raises(HomeAssistantError):
+        await _call_while_ticking(hass, freezer, VACUUM_DOMAIN, VacuumService.START)
+    assert periodic_roomba.connected
+    connects = periodic_roomba.connect.await_count
+
+    async def _connect_with_mission() -> None:
+        periodic_roomba.connected = True
+        status = periodic_roomba.master_state["state"]["reported"]["cleanMissionStatus"]
+        _publish(periodic_roomba, {"cleanMissionStatus": status})
+
+    periodic_roomba.connect.side_effect = _connect_with_mission
+    await _call_while_ticking(hass, freezer, VACUUM_DOMAIN, VacuumService.START)
+
+    assert periodic_roomba.connect.await_count == connects + 1
+    periodic_roomba.send_command.assert_awaited_once_with("start", None)
+
+
+async def _setup_interrupted_mission(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    entry: MockConfigEntry,
+    roomba: AsyncMock,
+) -> None:
+    """Set up with polling disabled and drop the session during a mission."""
+    _set_phase(roomba, "run")
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        entry, options={CONF_CONTINUOUS: False}, pref_disable_polling=True
+    )
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    await _advance(hass, freezer, timedelta(seconds=TELEMETRY_QUIET_SECONDS))
+    on_state = roomba.register_on_connection_state_callback.call_args.args[0]
+    roomba.connected = False
+    on_state("disconnected", "Wi-Fi outage")
+
+
+async def test_interrupted_mission_recovers_without_polling(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    mock_config_entry: MockConfigEntry,
+    periodic_roomba: AsyncMock,
+) -> None:
+    """Test a mission interrupted by an outage is picked up again."""
+    await _setup_interrupted_mission(hass, freezer, mock_config_entry, periodic_roomba)
+    connect = periodic_roomba.connect.side_effect
+    periodic_roomba.connect.side_effect = RoombaConnectionError
+    # The outage outlasts the mission check and the first recovery attempts.
+    for _ in range(3):
+        await _advance(hass, freezer, timedelta(seconds=MISSION_CHECK_SECONDS))
+
+    async def _connect_during_mission() -> None:
+        await connect()
+        status = periodic_roomba.master_state["state"]["reported"]["cleanMissionStatus"]
+        _publish(periodic_roomba, {"cleanMissionStatus": status})
+
+    periodic_roomba.connect.side_effect = _connect_during_mission
+    await _advance(hass, freezer, timedelta(seconds=MISSION_CHECK_SECONDS))
+    await _advance(hass, freezer, timedelta(seconds=TELEMETRY_QUIET_SECONDS))
+
+    assert periodic_roomba.connected
+
+
+async def test_interrupted_mission_recovery_is_bounded(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    mock_config_entry: MockConfigEntry,
+    periodic_roomba: AsyncMock,
+) -> None:
+    """Test recovery of an interrupted mission stops after a while."""
+    await _setup_interrupted_mission(hass, freezer, mock_config_entry, periodic_roomba)
+    periodic_roomba.connect.side_effect = RoombaConnectionError
+
+    for _ in range(RECOVERY_ATTEMPTS + 5):
+        await _advance(hass, freezer, timedelta(seconds=MISSION_CHECK_SECONDS))
+
+    # One connect at setup plus one per recovery attempt.
+    assert periodic_roomba.connect.await_count == 1 + RECOVERY_ATTEMPTS
